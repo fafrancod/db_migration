@@ -3,7 +3,8 @@ from sqlalchemy.orm import Session
 import logging
 import csv
 import io
-from . import crud, schemas, models  # Asegúrate de importar models
+from . import crud, schemas, models
+from sqlalchemy import text
 from .database import get_db
 
 
@@ -126,3 +127,77 @@ def get_employees(db: Session = Depends(get_db)):
     if not employees:
         raise HTTPException(status_code=404, detail="No employees found")
     return employees
+
+@router.get("/employees-hired-by-quarter/")
+def employees_hired_by_quarter(db: Session = Depends(get_db)):
+    query = text("""
+    SELECT d.department AS department, j.job AS job,
+    SUM(CASE WHEN EXTRACT(QUARTER FROM CAST(COALESCE(e.datetime, '1900-01-01') AS TIMESTAMP)) = 1 THEN 1 ELSE 0 END) AS Q1,
+    SUM(CASE WHEN EXTRACT(QUARTER FROM CAST(COALESCE(e.datetime, '1900-01-01') AS TIMESTAMP)) = 2 THEN 1 ELSE 0 END) AS Q2,
+    SUM(CASE WHEN EXTRACT(QUARTER FROM CAST(COALESCE(e.datetime, '1900-01-01') AS TIMESTAMP)) = 3 THEN 1 ELSE 0 END) AS Q3,
+    SUM(CASE WHEN EXTRACT(QUARTER FROM CAST(COALESCE(e.datetime, '1900-01-01') AS TIMESTAMP)) = 4 THEN 1 ELSE 0 END) AS Q4
+    FROM employees e
+    LEFT JOIN departments d ON e.department_id = d.id
+    LEFT JOIN jobs j ON e.job_id = j.id
+    WHERE EXTRACT(YEAR FROM CAST(COALESCE(e.datetime, '1900-01-01') AS TIMESTAMP)) = 2021
+    GROUP BY d.department, j.job
+    ORDER BY d.department ASC, j.job ASC;
+    """)
+    try:
+        result = db.execute(query).fetchall()
+        
+        if not result:
+            raise HTTPException(status_code=404, detail="No data found for 2021")
+        # Convertir los resultados en una lista de diccionarios para que FastAPI pueda serializarlos
+        response = []
+        for row in result:
+            response.append({
+                "department": row[0],
+                "job": row[1],
+                "Q1": row[2],
+                "Q2": row[3],
+                "Q3": row[4],
+                "Q4": row[5]
+            })
+        return response
+    except Exception as e:
+        logger.error(f"An error occurred during the query execution: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+@router.get("/departments-hiring-above-average/")
+def departments_hiring_above_average(db: Session = Depends(get_db)):
+    query = text("""
+    WITH department_hires AS (
+        SELECT d.id, d.department, COUNT(e.id) AS hired
+        FROM employees e
+        JOIN departments d ON e.department_id = d.id
+        WHERE EXTRACT(YEAR FROM CAST(COALESCE(e.datetime, '1900-01-01') AS TIMESTAMP)) = 2021
+        GROUP BY d.id, d.department
+    )
+
+    SELECT id, department, hired
+    FROM department_hires
+    WHERE hired > (SELECT AVG(hired) FROM department_hires)
+    ORDER BY hired DESC;
+    """)
+    try:
+        result = db.execute(query).fetchall()
+        
+        # Mostrar los resultados en la consola
+        if not result:
+            logger.info("No departments found hiring above average.")
+            raise HTTPException(status_code=404, detail="No departments found hiring above average")
+        
+        # Convertir el resultado en una lista de diccionarios para que sea legible
+        result_dicts = [{"id": row[0], "department": row[1], "hired": row[2]} for row in result]
+        
+        # Imprimir el resultado en la consola
+        logger.info(f"Departments hiring above average: {result_dicts}")
+        
+        return result_dicts
+    
+    except Exception as e:
+        logger.error(f"An error occurred during the query execution: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+
